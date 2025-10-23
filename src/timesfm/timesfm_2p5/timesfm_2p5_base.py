@@ -191,3 +191,33 @@ class TimesFM_2p5:
     output_points = np.concatenate(output_points, axis=0)
     output_quantiles = np.concatenate(output_quantiles, axis=0)
     return output_points[:num_inputs], output_quantiles[:num_inputs]
+
+  def encode(self, inputs: list[np.ndarray]):
+    context = self.forecast_config.max_context
+    num_inputs = len(inputs)
+    if (w := num_inputs % self.global_batch_size) != 0:
+      inputs += [np.array([0.0] * 3)] * (self.global_batch_size - w)
+
+    output_encode_list = []
+    values = []
+    masks = []
+    idx = 0
+    for each_input in inputs:
+      value = linear_interpolation(strip_leading_nans(np.array(each_input)))
+      if (w := len(value)) >= context:
+        value = value[-context:]
+        mask = np.zeros_like(value, dtype=bool)
+      else:
+        mask = np.array([True] * (context - w) + [False] * w)
+        value = np.pad(value, (context - w, 0), "constant", constant_values=0.0)
+      values.append(value)
+      masks.append(mask)
+      idx += 1
+      if idx == self.global_batch_size:
+        idx = 0
+        output_encode = self.compiled_encode(values, masks)
+        output_encode_list.append(output_encode)
+        values = []
+        masks = []
+
+    return output_encode_list

@@ -117,6 +117,44 @@ class TimesFM_2p5_200M_torch_module(nn.Module):
       output_quantile_spread,
     ), new_decode_caches
 
+
+  def encode(self, inputs, masks):
+    """Encodes the time series."""
+
+    with torch.no_grad():
+      batch_size, context = inputs.shape[0], inputs.shape[1]
+      num_input_patches = context // self.p
+
+      # Prefill
+      patched_inputs = torch.reshape(inputs, (batch_size, -1, self.p))
+      patched_masks = torch.reshape(masks, (batch_size, -1, self.p))
+
+      # running stats
+      n = torch.zeros(batch_size, device=inputs.device)
+      mu = torch.zeros(batch_size, device=inputs.device)
+      sigma = torch.zeros(batch_size, device=inputs.device)
+      patch_mu = []
+      patch_sigma = []
+      for i in range(num_input_patches):
+        (n, mu, sigma), _ = util.update_running_stats(
+          n, mu, sigma, patched_inputs[:, i], patched_masks[:, i]
+        )
+        patch_mu.append(mu)
+        patch_sigma.append(sigma)
+      last_n, last_mu, last_sigma = n, mu, sigma
+      context_mu = torch.stack(patch_mu, dim=1)
+      context_sigma = torch.stack(patch_sigma, dim=1)
+
+      normed_inputs = revin(patched_inputs, context_mu, context_sigma, reverse=False)
+      normed_inputs = torch.where(patched_masks, 0.0, normed_inputs)
+      (_, output_embeddings, _, _), _ = self(
+        normed_inputs, patched_masks, None
+      )
+      output_embeddings = output_embeddings.reshape(batch_size, context, -1).mean(dim=-1)
+
+    return output_embeddings
+
+
   def decode(self, horizon: int, inputs, masks):
     """Decodes the time series."""
 
@@ -460,4 +498,12 @@ class TimesFM_2p5_200M_torch(timesfm_2p5_base.TimesFM_2p5, ModelHubMixin):
       full_forecast = full_forecast.detach().cpu().numpy()
       return full_forecast[..., 5], full_forecast
 
+    def _compiled_encode(inputs, masks):
+      inputs = (
+        torch.from_numpy(np.array(inputs)).to(self.model.device).to(torch.float32)
+      )
+      masks = torch.from_numpy(np.array(masks)).to(self.model.device).to(torch.bool)
+      return self.model.encode(inputs, masks)
+
     self.compiled_decode = _compiled_decode
+    self.compiled_encode = _compiled_encode
